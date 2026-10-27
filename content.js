@@ -57,7 +57,7 @@ document.addEventListener('keydown', async (event) => {
             // 2. BACKGROUND AI REDACTION
             // ==========================================
             try {
-                const response = await fetch('http://127.0.0.1:8080/v1/redact', {
+                const response = await fetch('https://sovereign-api-pepf.onrender.com/v1/redact', {
                     method: 'POST',
                     headers: { 
                         'Content-Type': 'application/json',
