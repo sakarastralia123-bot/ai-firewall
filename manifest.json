@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Nepali AI Firewall",
+  "version": "1.0",
+  "description": "Automatically redacts Nepali names, phones, and passwords before sending to AI.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.deepseek.com/*",
+    "http://127.0.0.1:8080/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Firewall Settings"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.deepseek.com/*"
+      ],
+      "js": ["content.js"]
+    }
+  ]
+}
