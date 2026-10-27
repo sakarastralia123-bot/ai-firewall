@@ -6,25 +6,7 @@ function getInputBox() {
            document.querySelector('[contenteditable="true"]');
 }
 
-function showToast(message) {
-    const toast = document.createElement('div');
-    toast.textContent = message;
-    toast.style.position = 'fixed';
-    toast.style.bottom = '20px';
-    toast.style.right = '20px';
-    toast.style.backgroundColor = '#10B981';
-    toast.style.color = 'white';
-    toast.style.padding = '12px 24px';
-    toast.style.borderRadius = '8px';
-    toast.style.fontFamily = 'sans-serif';
-    toast.style.fontWeight = 'bold';
-    toast.style.zIndex = '99999';
-    toast.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-    document.body.appendChild(toast);
-    setTimeout(() => { toast.remove(); }, 3000);
-}
-
-// This forces React to recognize the text change
+// This forces React (ChatGPT) to recognize the text change instantly
 function setNativeValue(element, value) {
     const valueSetter = Object.getOwnPropertyDescriptor(element, 'value')?.set;
     const prototype = Object.getPrototypeOf(element);
@@ -41,10 +23,8 @@ function setNativeValue(element, value) {
 }
 
 document.addEventListener('keydown', async (event) => {
-    // 1. If we are already processing, IGNORE this keypress (prevents infinite loop)
     if (isProcessing) return;
 
-    // 2. Catch the user's real Enter key
     if (event.key === 'Enter' && !event.shiftKey) {
         const inputBox = getInputBox();
         if (!inputBox) return;
@@ -56,13 +36,26 @@ document.addEventListener('keydown', async (event) => {
             const isEnabled = result.firewallEnabled !== false;
             if (!isEnabled) return;
 
-            // 3. Stop the original message from sending
             event.preventDefault(); 
             event.stopPropagation();
-            
-            // 4. Lock the extension
             isProcessing = true;
 
+            // ==========================================
+            // 1. INSTANT LOCAL REDACTION (0ms Delay)
+            // ==========================================
+            let instantRedacted = originalText
+                .replace(/\b(98\d{8}|97\d{8})\b/g, '[PHONE_NUMBER]')
+                .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[EMAIL]')
+                // FIXED REGEX HERE: The 'i' flag is at the end, not inside the pattern
+                .replace(/(password|passwd|pwd|api_key|apikey|secret|token|auth)(?:\s+is)?[\s:=]+([^\s]+)/gi, (match, p1, p2) => {
+                    return match.replace(p2, '[SECRET]');
+                });
+            
+            setNativeValue(inputBox, instantRedacted);
+
+            // ==========================================
+            // 2. BACKGROUND AI REDACTION
+            // ==========================================
             try {
                 const response = await fetch('http://127.0.0.1:8080/v1/redact', {
                     method: 'POST',
@@ -75,37 +68,31 @@ document.addEventListener('keydown', async (event) => {
 
                 const data = await response.json();
                 
-                // 5. Put the redacted text into the box
-                setNativeValue(inputBox, data.redacted_text);
-                
-                if (data.entities_found > 0) {
-                    showToast(`🛡️ Redacted ${data.entities_found} sensitive items.`);
+                // If the AI found MORE things to redact, update the box again
+                if (data.redacted_text && data.redacted_text !== instantRedacted) {
+                    setNativeValue(inputBox, data.redacted_text);
                 }
 
-                // 6. Automatically press Enter for the user to send the safe text
-                setTimeout(() => {
-                    // First try clicking the send button
-                    const sendButton = document.querySelector('button[data-testid="send-button"]') || 
-                                       document.querySelector('button[aria-label="Send prompt"]');
-                    
-                    if (sendButton && !sendButton.disabled) {
-                        sendButton.click();
-                    } else {
-                        // If the button is hidden, simulate an Enter keypress
-                        inputBox.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-                        }));
-                    }
-                    
-                    // 7. Unlock the extension after a brief delay so you can type again
-                    setTimeout(() => { isProcessing = false; }, 500); 
-
-                }, 100);
+                // Send the message
+                const sendButton = document.querySelector('button[data-testid="send-button"]') || 
+                                   document.querySelector('button[aria-label="Send prompt"]');
+                
+                if (sendButton) {
+                    sendButton.click();
+                } else {
+                    inputBox.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                    }));
+                }
+                
+                setTimeout(() => { isProcessing = false; }, 500); 
 
             } catch (error) {
                 console.error("Firewall Error:", error);
-                showToast("❌ Firewall Offline or API Error");
-                isProcessing = false; 
+                // Even if the server fails, the instant redaction already happened.
+                const sendButton = document.querySelector('button[data-testid="send-button"]');
+                if (sendButton) sendButton.click();
+                setTimeout(() => { isProcessing = false; }, 500); 
             }
         });
     }
