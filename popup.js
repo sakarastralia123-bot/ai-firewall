@@ -1,12 +1,17 @@
-// Load the current state when the popup opens
 document.addEventListener('DOMContentLoaded', () => {
   const toggle = document.getElementById('toggleSwitch');
   const statusText = document.getElementById('statusText');
 
-  chrome.storage.local.get(['firewallEnabled'], (result) => {
-    // Default to true if not set
+  // Load saved state and stats
+  chrome.storage.local.get(['firewallEnabled', 'redactedCount'], (result) => {
     const isEnabled = result.firewallEnabled !== false; 
     toggle.checked = isEnabled;
+    
+    // Show redacted count if it exists
+    if (result.redactedCount) {
+        document.getElementById('redactedCount').innerText = result.redactedCount;
+    }
+
     updateUI(isEnabled);
   });
 
@@ -19,11 +24,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateUI(isEnabled) {
     if (isEnabled) {
-      statusText.textContent = 'Status: ON';
-      statusText.classList.add('active');
+      statusText.innerHTML = '<span class="dot"></span> Active';
+      statusText.style.color = '#10B981';
     } else {
-      statusText.textContent = 'Status: OFF';
-      statusText.classList.remove('active');
+      statusText.innerHTML = '<span class="dot" style="background:#EF4444; box-shadow:none; animation:none;"></span> Disabled';
+      statusText.style.color = '#EF4444';
     }
   }
 });

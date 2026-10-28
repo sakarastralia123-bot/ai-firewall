@@ -7,7 +7,7 @@
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.deepseek.com/*",
-    "http://127.0.0.1:8080/*"
+    "https://sovereign-api-pepf.onrender.com/*" 
   ],
   "action": {
     "default_popup": "popup.html",

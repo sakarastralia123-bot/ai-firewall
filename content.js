@@ -1,99 +1,211 @@
-let isProcessing = false;
+(() => {
+    "use strict";
 
-function getInputBox() {
-    return document.querySelector('#prompt-textarea') || 
-           document.querySelector('textarea') || 
-           document.querySelector('[contenteditable="true"]');
-}
+    const API_URL = "https://sovereign-api-pepf.onrender.com/v1/redact";
+    const FAIL_CLOSED = false;
 
-// This forces React (ChatGPT) to recognize the text change instantly
-function setNativeValue(element, value) {
-    const valueSetter = Object.getOwnPropertyDescriptor(element, 'value')?.set;
-    const prototype = Object.getPrototypeOf(element);
-    const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    let isProcessing = false;
+    let bypassNextClick = false;
 
-    if (valueSetter && valueSetter !== prototypeValueSetter) {
-        prototypeValueSetter.call(element, value);
-    } else if (valueSetter) {
-        valueSetter.call(element, value);
-    } else {
-        element.innerText = value;
-    }
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-document.addEventListener('keydown', async (event) => {
-    if (isProcessing) return;
-
-    if (event.key === 'Enter' && !event.shiftKey) {
-        const inputBox = getInputBox();
-        if (!inputBox) return;
-
-        const originalText = inputBox.value !== undefined ? inputBox.value : inputBox.innerText;
-        if (!originalText || originalText.trim() === '') return;
-
-        chrome.storage.local.get(['firewallEnabled'], async (result) => {
-            const isEnabled = result.firewallEnabled !== false;
-            if (!isEnabled) return;
-
-            event.preventDefault(); 
-            event.stopPropagation();
-            isProcessing = true;
-
-            // ==========================================
-            // 1. INSTANT LOCAL REDACTION (0ms Delay)
-            // ==========================================
-            let instantRedacted = originalText
-                .replace(/\b(98\d{8}|97\d{8})\b/g, '[PHONE_NUMBER]')
-                .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, '[EMAIL]')
-                // FIXED REGEX HERE: The 'i' flag is at the end, not inside the pattern
-                .replace(/(password|passwd|pwd|api_key|apikey|secret|token|auth)(?:\s+is)?[\s:=]+([^\s]+)/gi, (match, p1, p2) => {
-                    return match.replace(p2, '[SECRET]');
-                });
-            
-            setNativeValue(inputBox, instantRedacted);
-
-            // ==========================================
-            // 2. BACKGROUND AI REDACTION
-            // ==========================================
-            try {
-                const response = await fetch('https://sovereign-api-pepf.onrender.com/v1/redact', {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'x-api-key': 'sk_test_demo'
-                    },
-                    body: JSON.stringify({ text: originalText })
-                });
-
-                const data = await response.json();
-                
-                // If the AI found MORE things to redact, update the box again
-                if (data.redacted_text && data.redacted_text !== instantRedacted) {
-                    setNativeValue(inputBox, data.redacted_text);
-                }
-
-                // Send the message
-                const sendButton = document.querySelector('button[data-testid="send-button"]') || 
-                                   document.querySelector('button[aria-label="Send prompt"]');
-                
-                if (sendButton) {
-                    sendButton.click();
-                } else {
-                    inputBox.dispatchEvent(new KeyboardEvent('keydown', {
-                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-                    }));
-                }
-                
-                setTimeout(() => { isProcessing = false; }, 500); 
-
-            } catch (error) {
-                console.error("Firewall Error:", error);
-                // Even if the server fails, the instant redaction already happened.
-                const sendButton = document.querySelector('button[data-testid="send-button"]');
-                if (sendButton) sendButton.click();
-                setTimeout(() => { isProcessing = false; }, 500); 
-            }
+    // 1. LOCAL REDACTION
+    function redactLocally(text) {
+        if (typeof text !== "string" || !text) return text;
+        let result = text;
+        result = result.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL]");
+        result = result.replace(/(?<!\w)(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)\d{3,4}[\s.-]?\d{3,4}(?!\w)/g, "[PHONE]");
+        const credentialPattern = /\b(pass[\s_-]*word|passwd|pwd|api[\s_-]*key|secret|token|authorization|auth)\b\s*(?:(?:is|are)\s+|[:=]\s*|\s+)([^\s,;]+)/gi;
+        result = result.replace(credentialPattern, (match, label) => `${label} [SECRET]`);
+        result = result.replace(/\b(?:\d[ -]*?){13,19}\b/g, (match) => {
+            const digits = match.replace(/\D/g, "");
+            return digits.length >= 13 && digits.length <= 19 ? "[CARD NUMBER]" : match;
         });
+        return result;
     }
-}, true);
+
+    // 2. HELPERS
+    function getMessageElement(target) {
+        if (!(target instanceof Element)) return null;
+        const editable = target.closest('textarea, input:not([type="button"]):not([type="submit"]), [contenteditable="true"], [role="textbox"]');
+        if (!editable || editable.matches('input[type="password"]')) return null;
+        return editable;
+    }
+
+    function getText(element) {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) return element.value;
+        return element.innerText || element.textContent || "";
+    }
+
+    function setText(element, text) {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+            const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+            if (setter) setter.call(element, text);
+            else element.value = text;
+        } else {
+            element.textContent = text;
+        }
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: null }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function findSendButton(element) {
+        const form = element?.closest("form");
+        if (form) {
+            const formButton = form.querySelector('button[type="submit"], input[type="submit"]');
+            if (formButton && !formButton.disabled) return formButton;
+        }
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'));
+        const candidates = buttons.filter((button) => {
+            if (button.disabled) return false;
+            const label = [button.innerText, button.getAttribute("aria-label"), button.getAttribute("data-testid"), button.getAttribute("title"), button.value].filter(Boolean).join(" ").toLowerCase();
+            return /\b(send|submit|send message)\b/.test(label);
+        });
+        return candidates.find((button) => {
+            const rect = button.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        }) || null;
+    }
+
+    // 3. REMOTE REDACTION WITH 60s TIMEOUT
+    async function redactWithAPI(locallyRedactedText) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); 
+
+        try {
+            showNotice("Waking up security gateway...");
+            const response = await fetch(API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-api-key": "sk_test_demo"
+                },
+                body: JSON.stringify({ text: locallyRedactedText }),
+                signal: controller.signal
+            });
+
+            clearTimeout(timeoutId);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            
+            // UPDATE THE POPUP COUNTER
+            if (data.entities_found > 0) {
+                chrome.storage.local.get(['redactedCount'], (res) => {
+                    const newCount = (res.redactedCount || 0) + data.entities_found;
+                    chrome.storage.local.set({ redactedCount: newCount });
+                });
+            }
+
+            return data.redacted_text ?? data.text ?? locallyRedactedText;
+        } catch (error) {
+            clearTimeout(timeoutId);
+            throw error;
+        }
+    }
+
+    // 4. FIREWALL SUBMISSION
+    async function processSubmission(element, sendButton) {
+        if (isProcessing || !element || !document.contains(element)) return;
+        const originalText = getText(element);
+        if (!originalText.trim()) return;
+
+        isProcessing = true;
+
+        try {
+            const locallyRedacted = redactLocally(originalText);
+            setText(element, locallyRedacted);
+
+            let finalText = locallyRedacted;
+
+            try {
+                finalText = await redactWithAPI(locallyRedacted);
+                showNotice("🛡️ Privacy check complete.");
+            } catch (apiError) {
+                console.error("[Privacy Firewall] API error:", apiError.message);
+                if (FAIL_CLOSED) {
+                    showNotice("Message blocked: API failed to respond.");
+                    return;
+                }
+                showNotice("Sending locally redacted text (AI offline).");
+            }
+
+            setText(element, finalText);
+
+            if (!sendButton || !document.contains(sendButton)) {
+                sendButton = findSendButton(element);
+            }
+
+            if (!sendButton || sendButton.disabled) {
+                showNotice("Send button not found.");
+                return;
+            }
+
+            bypassNextClick = true;
+            sendButton.click();
+            queueMicrotask(() => { bypassNextClick = false; });
+
+        } catch (error) {
+            console.error("[Privacy Firewall] Submission error:", error);
+            showNotice("The firewall encountered an error.");
+        } finally {
+            isProcessing = false;
+        }
+    }
+
+    // 5. NOTICE UI
+    function showNotice(message) {
+        let notice = document.getElementById("privacy-firewall-notice");
+        if (!notice) {
+            notice = document.createElement("div");
+            notice.id = "privacy-firewall-notice";
+            Object.assign(notice.style, {
+                position: "fixed", bottom: "20px", right: "20px", zIndex: "2147483647",
+                maxWidth: "360px", padding: "12px 16px", background: "#0F172A",
+                color: "#ffffff", border: "1px solid #334155", borderRadius: "8px",
+                fontSize: "14px", fontFamily: "sans-serif", fontWeight: "500",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.25)"
+            });
+            document.body.appendChild(notice);
+        }
+        notice.textContent = message;
+        notice.style.display = "block";
+        window.clearTimeout(notice._hideTimer);
+        notice._hideTimer = window.setTimeout(() => { notice.style.display = "none"; }, 6000);
+    }
+
+    // 6. EVENT LISTENERS
+    document.addEventListener("click", (event) => {
+        if (bypassNextClick) { bypassNextClick = false; return; }
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const button = target.closest('button, [role="button"], input[type="submit"]');
+        if (!button) return;
+        const label = [button.innerText, button.getAttribute("aria-label"), button.getAttribute("data-testid"), button.getAttribute("title"), button.value].filter(Boolean).join(" ").toLowerCase();
+        const looksLikeSend = /\b(send|submit|send message)\b/.test(label) || button.matches('button[type="submit"], input[type="submit"]');
+        if (!looksLikeSend) return;
+
+        const form = button.closest("form");
+        const activeElement = document.activeElement;
+        const input = getMessageElement(activeElement) || (form ? form.querySelector('textarea, [contenteditable="true"], [role="textbox"], input:not([type="button"]):not([type="submit"])') : null) || document.querySelector('textarea, [contenteditable="true"][role="textbox"], [contenteditable="true"], [role="textbox"]');
+        if (!input) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        processSubmission(input, button);
+    }, true);
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+        const input = getMessageElement(event.target);
+        if (!input) return;
+        const isMessageInput = input.matches("textarea, [contenteditable='true'], [role='textbox']");
+        if (!isMessageInput) return;
+        const sendButton = findSendButton(input);
+        if (!sendButton) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        processSubmission(input, sendButton);
+    }, true);
+
+})();
